@@ -4,10 +4,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import os
-import ollama
+from google import genai
 
 from ingest_service import get_model, get_client, get_collection, run_ingestion, DOCUMENTS_FOLDER
-
+from dotenv import load_dotenv
+load_dotenv()
 app = FastAPI(title="RAG Knowledge Assistant")
 
 # -----------------------------
@@ -40,7 +41,8 @@ collection = get_collection(client)
 
 MAX_DISTANCE = 1.5
 
-LLM_MODEL = "llama3.2:3b"
+LLM_MODEL = "gemini-2.5-flash"
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 # -----------------------------
@@ -212,17 +214,12 @@ Answer:
 """
 
         # Ask Ollama
-        response = ollama.chat(
-            model=LLM_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
+        response = client.models.generate_content(
+           model=LLM_MODEL,
+           contents=prompt
+            )
 
-        answer = response["message"]["content"]
+        answer = response.text
 
         # Return answer + sources
         return {
