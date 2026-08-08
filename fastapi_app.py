@@ -5,19 +5,23 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import os
 from google import genai
-
-from ingest_service import get_model, get_client, get_collection, run_ingestion, DOCUMENTS_FOLDER
+from ingest_service import (
+    get_model,
+    get_client,
+    get_collection,
+    run_ingestion,
+    DOCUMENTS_FOLDER,
+)
 from dotenv import load_dotenv
+
 load_dotenv()
+
 app = FastAPI(title="RAG Knowledge Assistant")
 
 # -----------------------------
 # CORS
 # -----------------------------
-# Allows the frontend (served from a different origin, e.g. a local static
-# file server or a dev server on another port) to call this API. Wide open
-# for local development -- restrict allow_origins to your real frontend
-# URL before deploying anywhere public.
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,18 +35,30 @@ os.makedirs(DOCUMENTS_FOLDER, exist_ok=True)
 # -----------------------------
 # Load RAG components
 # -----------------------------
-# Same embedding model + ChromaDB collection as before. Loaded once at
-# startup and reused by /upload, /ask and /reindex so there is only ever
-# one client/collection instance talking to the database.
-
-model = get_model()
-client = get_client()
-collection = get_collection(client)
 
 MAX_DISTANCE = 1.5
-
 LLM_MODEL = "gemini-2.5-flash"
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Load ChromaDB components
+chroma_client = get_client()
+collection = get_collection(chroma_client)
+
+# Load embedding model only when needed
+model = None
+
+# Gemini client
+gemini_client = genai.Client(
+    api_key=os.getenv("GEMINI_API_KEY")
+)
+
+
+def get_embedding_model():
+    global model
+
+    if model is None:
+        model = get_model()
+
+    return model
 
 
 # -----------------------------
@@ -53,10 +69,12 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 def health_check():
     try:
         chunk_count = collection.count()
+
         return {
             "status": "ok",
             "chunks_indexed": chunk_count
         }
+
     except Exception as e:
         return {
             "status": "error",
@@ -70,7 +88,6 @@ def health_check():
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-
     try:
         if not file.filename:
             return {
@@ -97,11 +114,16 @@ async def upload_pdf(file: UploadFile = File(...)):
         with open(file_path, "wb") as f:
             f.write(content)
 
-        # Automatically (re)index every PDF in documents/ so the new file
-        # is immediately searchable -- this calls the exact same
-        # extraction/chunking/embedding logic as `python ingest.py`.
+        # Load embedding model only when indexing is required
         try:
-            ingest_result = run_ingestion(collection=collection, model=model, verbose=False)
+            embedding_model = get_embedding_model()
+
+            ingest_result = run_ingestion(
+                collection=collection,
+                model=embedding_model,
+                verbose=False
+            )
+
         except Exception as e:
             return {
                 "error": f"File was uploaded but indexing failed: {str(e)}",
@@ -127,12 +149,20 @@ async def upload_pdf(file: UploadFile = File(...)):
 @app.post("/reindex")
 def reindex():
     try:
-        result = run_ingestion(collection=collection, model=model, verbose=False)
+        embedding_model = get_embedding_model()
+
+        result = run_ingestion(
+            collection=collection,
+            model=embedding_model,
+            verbose=False
+        )
+
         return {
             "message": "Re-indexing complete",
             "files_processed": result["files_processed"],
             "chunks_indexed": result["total_chunks"]
         }
+
     except Exception as e:
         return {
             "error": f"Re-indexing failed: {str(e)}"
@@ -149,7 +179,6 @@ class QuestionRequest(BaseModel):
 
 @app.post("/ask")
 async def ask_question(request: QuestionRequest):
-
     try:
         question = request.question
 
@@ -158,8 +187,11 @@ async def ask_question(request: QuestionRequest):
                 "error": "Question cannot be empty"
             }
 
+        # Load embedding model only when a question is asked
+        embedding_model = get_embedding_model()
+
         # Convert question to embedding
-        question_embedding = model.encode(
+        question_embedding = embedding_model.encode(
             question
         ).tolist()
 
@@ -213,11 +245,11 @@ Question:
 Answer:
 """
 
-        # Ask Ollama
-        response = client.models.generate_content(
-           model=LLM_MODEL,
-           contents=prompt
-            )
+        # Ask Gemini
+        response = gemini_client.models.generate_content(
+            model=LLM_MODEL,
+            contents=prompt
+        )
 
         answer = response.text
 
@@ -245,7 +277,6 @@ Answer:
 
 @app.get("/documents")
 def list_documents():
-
     try:
         files = [
             filename
@@ -266,14 +297,18 @@ def list_documents():
 # -----------------------------
 # Serve the frontend
 # -----------------------------
-# Mounted last so it doesn't shadow the API routes above. This lets you
-# run just this one file and open http://127.0.0.1:8000 to get the whole
-# app -- no separate frontend server needed.
 
-FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+FRONTEND_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "frontend"
+)
 
 if os.path.isdir(FRONTEND_DIR):
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    app.mount(
+        "/",
+        StaticFiles(directory=FRONTEND_DIR, html=True),
+        name="frontend"
+    )
 
 
 # -----------------------------
@@ -281,7 +316,6 @@ if os.path.isdir(FRONTEND_DIR):
 # -----------------------------
 
 if __name__ == "__main__":
-
     import uvicorn
 
     uvicorn.run(
